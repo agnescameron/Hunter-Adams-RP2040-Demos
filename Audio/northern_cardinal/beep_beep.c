@@ -49,7 +49,7 @@ typedef signed int fix15 ;
 // the DDS units - core 0
 // Phase accumulator and phase increment. Increment sets output frequency.
 volatile unsigned int phase_accum_main_0;
-volatile unsigned int phase_incr_main_0 = (2300.0*two32)/Fs ;
+volatile unsigned int phase_incr_main_0 = (two32)/Fs ;
 volatile short beep_increment = 0 ;
 
 // DDS sine table (populated in main())
@@ -68,11 +68,11 @@ fix15 current_amplitude_0 = 0 ;         // current amplitude (modified in ISR)
 fix15 current_amplitude_1 = 0 ;         // current amplitude (modified in ISR)
 
 // Timing parameters for beeps (units of interrupts)
-#define ATTACK_TIME             20
-#define DECAY_TIME              20
-#define SUSTAIN_TIME            400
-#define BEEP_DURATION           440
-#define BEEP_REPEAT_INTERVAL    680
+#define ATTACK_TIME             200
+#define DECAY_TIME              200
+#define SUSTAIN_TIME            4000
+#define BEEP_DURATION           4400
+#define BEEP_REPEAT_INTERVAL    6800
 #define BEEPS_PER_CHIRP         8
 #define CHIRP_INTERVAL          12000
 
@@ -111,11 +111,12 @@ bool repeating_timer_callback_core_0(struct repeating_timer *t) {
 
     if (STATE_0 == 0) {
         // DDS phase and sine table lookup
-        //phase_accum_main_0 += phase_incr_main_0  ;
-        // float swoop_freq = -260*sin_table[]
+        phase_accum_main_0 += phase_incr_main_0;
+        float swoop_ticker = -(M_PI*phase_accum_main_0)/5720
+        float swoop_freq = -260*sin_table[swoop_ticker>>24] + 1740;
 
         DAC_output_0 = fix2int15(multfix15(current_amplitude_0,
-            sin_table[phase_accum_main_0>>24])) + 2048 ;
+            swoop_freq)) + 2048 ;
 
         // Ramp up amplitude
         if (count_0 < ATTACK_TIME) {
