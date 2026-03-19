@@ -27,12 +27,14 @@
 #include "pico/stdlib.h"
 #include "pico/multicore.h"
 #include "hardware/spi.h"
+#include "hardware/gpio.h"
 #include "hardware/sync.h"
 // Include protothreads
 #include "pt_cornell_rp2040_v1.h"
 
 // Macros for fixed-point arithmetic (faster than floating point)
 typedef signed int fix15 ;
+// #define mul(a,b) ((fix)(((( signed long long )(a))*(( signed long long )(b)))>>12)) //multiply two fixed 16:16
 #define multfix15(a,b) ((fix15)((((signed long long)(a))*((signed long long)(b)))>>15))
 #define float2fix15(a) ((fix15)((a)*32768.0)) 
 #define fix2float15(a) ((float)(a)/32768.0)
@@ -54,7 +56,7 @@ volatile short beep_increment = 0 ;
 
 // DDS sine table (populated in main())
 #define sine_table_size 256
-fix15 sin_table[sine_table_size] ;
+fix15 sine_table[sine_table_size] ;
 
 // Values output to DAC
 int DAC_output_0 ;
@@ -75,7 +77,7 @@ fix15 current_amplitude_1 = 0 ;         // current amplitude (modified in ISR)
 #define CHIRP_ATTACK            1500
 #define CHIRP_DECAY             1000
 #define SUSTAIN_TIME            400
-#define BEEP_DURATION           440
+#define BEEP_DURATION           100000
 #define BEEP_REPEAT_INTERVAL    680
 #define BEEPS_PER_CHIRP         8
 #define CHIRP_INTERVAL          20000
@@ -105,6 +107,7 @@ uint16_t DAC_data_0 ; // output value
 #define PIN_MOSI 7
 #define LDAC     8
 #define LED      25
+#define BUTTON   0
 #define SPI_PORT spi0
 
 // Two variables to store core number
@@ -113,101 +116,69 @@ volatile int corenum_0  ;
 // Global counter for spinlock experimenting
 volatile int global_counter = 0 ;
 
+float note = 130.8;
+fix15 max_mod_depth, current_mod_depth ; 
+unsigned int mod_inc, main_inc ;
+unsigned int mod_accum, main_accum ;
+fix15 current_mod_depth = 70000;
+fix15 octave_num = 4;
+fix15 Fmod = 2;
+
+fix15 mod_wave, main_wave ;
+
 
 // This timer ISR is called on core 0
 bool repeating_timer_callback_core_0(struct repeating_timer *t) {
 
-    // within each chirp, add the envelope
-    if (STATE_1 == 0){
-        // shape base amplitude
-        if (count_1 < CHIRP_ATTACK) {
-            current_amplitude_1 = (current_amplitude_1 + chirp_attack_inc) ;
-        }
-        // Ramp down amplitude
-        else if (count_1 > CHIRP_DURATION - CHIRP_DECAY) {
-            current_amplitude_1 = (current_amplitude_1 - chirp_decay_inc) ;
-        }
+    if (STATE_0 == 0){
 
-        // within each beep, ramp up the freq and then ramp down
-        if (STATE_0 == 0) {
-            // DDS phase and sine table lookup
-            phase_accum_main_0 += phase_incr_main_0  ;
-            // float swoop_freq = -260*sin_table[];
+        // DDS phase and sine table lookup
+        phase_accum_main_0 += phase_incr_main_0  ;
+        // float swoop_freq = -260*sine_table[];
 
-            fix15 write_amplitude = 0;
-            // bitmask one number by another number?
-            if(current_amplitude_0 > current_amplitude_1) {
-                write_amplitude = current_amplitude_1;
-            }
-            else write_amplitude = current_amplitude_0;
+        float current_note = 500.0 ;
+        main_inc = current_note * pow(2,32 )/ Fs ;
+        mod_inc = Fmod * current_note * pow(2,32 )/ Fs ;
 
-            DAC_output_0 = fix2int15(multfix15(write_amplitude,
-                sin_table[phase_accum_main_0>>24])) + 2048 ;
+        // compute modulating wave
+        mod_accum += mod_inc ;
+        mod_wave = sine_table[mod_accum>>24] ;
 
-            // Ramp up amplitude
-            if (count_0 < ATTACK_TIME) {
-                current_amplitude_0 = (current_amplitude_0 + attack_inc) ;
-            }
-            // Ramp down amplitude
-            else if (count_0 > BEEP_DURATION - DECAY_TIME) {
-                current_amplitude_0 = (current_amplitude_0 - decay_inc) ;
-            }
+        // set dds main freq and FM modulate it
+        main_accum += main_inc + (unsigned int) multfix15(mod_wave, current_mod_depth) ;
+        // update main waveform
+        main_wave = sine_table[main_accum>>24] ;
 
-            // Mask with DAC control bits
-            DAC_data_0 = (DAC_config_chan_B | (DAC_output_0 & 0xffff))  ;
+        DAC_output_0 = fix2int15(multfix15(max_amplitude,
+            main_wave)) + 2048 ; // limit to amp
 
-            // SPI write (no spinlock b/c of SPI buffer)
-            spi_write16_blocking(SPI_PORT, &DAC_data_0, 1) ;
+        // Mask with DAC control bits
+        DAC_data_0 = (DAC_config_chan_B | (DAC_output_0 & 0xffff))  ;
 
-            // Increment the counter
-            count_0 += 1 ;
-            count_1 += 1 ;
-            
-            // State transition?
-            if (count_0 == BEEP_DURATION) {
-                STATE_0 = 1 ;
-                count_0 = 0 ;
-            }
+        // SPI write (no spinlock b/c of SPI buffer)
+        spi_write16_blocking(SPI_PORT, &DAC_data_0, 1) ;
+
+        // Increment the counter
+        count_0 += 1 ;
+        
+        // State transition?
+        if (count_0 == BEEP_DURATION) {
+            STATE_0 = 1 ;
         }
 
-        else {
-            count_0 += 1 ;
-            count_1 += 1 ;
 
-            // counts 8 beeps and then stops
-            if (count_0 == BEEP_REPEAT_INTERVAL && beep_increment < BEEPS_PER_CHIRP) {
-                current_amplitude_0 = 0 ;
-                STATE_0 = 0 ;
-                count_0 = 0 ;
-                beep_increment += 1;
-            }
-        }
-
-            // State transition?
-        if (count_1 == CHIRP_DURATION) {
-            STATE_1 = 1 ;
-        }
-
-    }
-        // State transition
-    // when state is 1 you are waiting for next beeps
-    else {
-            count_1 += 1 ;
-
-            if (count_1 == CHIRP_INTERVAL){
-                beep_increment = 0;
-                current_amplitude_1 = 0 ;
-                STATE_0 = 0 ;
-                STATE_1 = 0 ;
-                count_0 = 0 ;
-                count_1 = 0 ;
-            }
     }
 
     // retrieve core number of execution
-    corenum_0 = get_core_num() ;
+    corenum_0 = get_core_num();
 
     return true;
+}
+
+// GPIO ISR. Toggles LED
+void gpio_callback() {
+    count_0 = 0;
+    STATE_0 = 0;
 }
 
 
@@ -246,6 +217,9 @@ int main() {
     gpio_set_function(PIN_MOSI, GPIO_FUNC_SPI);
     gpio_set_function(PIN_CS, GPIO_FUNC_SPI) ;
 
+        // Configure GPIO interrupt
+    gpio_set_irq_enabled_with_callback(0, GPIO_IRQ_EDGE_RISE, true, &gpio_callback);
+
     // Map LDAC pin to GPIO port, hold it low (could alternatively tie to GND)
     gpio_init(LDAC) ;
     gpio_set_dir(LDAC, GPIO_OUT) ;
@@ -255,6 +229,10 @@ int main() {
     gpio_init(LED) ;
     gpio_set_dir(LED, GPIO_OUT) ;
     gpio_put(LED, 0) ;
+
+    gpio_init(BUTTON);
+    gpio_set_dir(BUTTON, GPIO_IN);
+    gpio_pull_down(0);
 
     // set up increments for calculating bow envelope
     attack_inc = divfix(max_amplitude, int2fix15(ATTACK_TIME)) ;
@@ -266,7 +244,7 @@ int main() {
     // scaled to produce values between 0 and 4096 (for 12-bit DAC)
     int ii;
     for (ii = 0; ii < sine_table_size; ii++){
-         sin_table[ii] = float2fix15(2047*sin((float)ii*6.283/(float)sine_table_size));
+         sine_table[ii] = float2fix15(2047*sin((float)ii*6.283/(float)sine_table_size));
     }
 
     // Create a repeating timer that calls 

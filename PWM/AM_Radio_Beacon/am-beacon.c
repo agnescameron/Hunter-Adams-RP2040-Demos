@@ -23,6 +23,7 @@
 #include "pico/multicore.h"
 
 #include "hardware/pwm.h"
+#include "hardware/clocks.h"
 
 // PWM wrap value and clock divide value
 // For a CPU rate of 250 MHz, this gives

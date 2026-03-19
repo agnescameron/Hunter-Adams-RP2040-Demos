@@ -19,6 +19,7 @@
 
 #include "hardware/pwm.h"
 #include "hardware/irq.h"
+#include "hardware/clocks.h"
 
 #include "pt_cornell_rp2040_v1.h"
 
