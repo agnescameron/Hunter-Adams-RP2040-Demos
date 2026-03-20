@@ -83,12 +83,12 @@ fix15 current_amplitude_1 = 0 ;         // current amplitude (modified in ISR)
 #define NOTE_DELAY             1000
 
 #define NOISE_ATTACK            250
-#define PITCH_ATTACK            200
+#define PITCH_ATTACK            500
 #define MOD_ATTACK_TIME         90
 #define ATTACK_TIME             160
 
 #define NOISE_DECAY             240
-#define PITCH_DECAY             200
+#define PITCH_DECAY             500
 #define MOD_DECAY_TIME          320
 #define DECAY_TIME              220
 
@@ -139,7 +139,7 @@ volatile unsigned int mod_accum, main_accum ;
 volatile bool button_ready = true;
 volatile fix15 max_mod_depth = 200000;
 volatile fix15 current_mod_depth = 2000;
-volatile fix15 max_pitch_bend = 2000;
+volatile fix15 max_pitch_bend = 8000;
 volatile fix15 pitch_bend = 0;
 fix15 octave_num = 4;
 fix15 Fmod = 3.0;
