@@ -154,7 +154,7 @@ bool repeating_timer_callback_core_0(struct repeating_timer *t) {
     phase_accum_main_0 += phase_incr_main_0  ;
     // float swoop_freq = -260*sine_table[];
 
-    float current_note = 250.0 + 900.0*pitch*pitch;
+    float current_note = 230.0 + 1000.0*pitch*pitch;
 
     Fmod = 3.0 + 1.0*pitch;
     main_inc = current_note * pow(2,32 )/ Fs ;
