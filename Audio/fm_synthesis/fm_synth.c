@@ -24,6 +24,7 @@
 #include <stdio.h>
 #include <math.h>
 #include <string.h>
+#include <stdlib.h>
 #include "pico/stdlib.h"
 #include "pico/multicore.h"
 #include "pico/time.h"
@@ -54,7 +55,6 @@ typedef signed int fix15 ;
 // Phase accumulator and phase increment. Increment sets output frequency.
 volatile unsigned int phase_accum_main_0;
 volatile unsigned int phase_incr_main_0 = (2300.0*two32)/Fs ;
-volatile short beep_increment = 0 ;
 
 // DDS sine table (populated in main())
 #define sine_table_size 256
@@ -66,19 +66,29 @@ int DAC_output_1 ;
 
 // Amplitude modulation parameters and variables
 fix15 max_amplitude = int2fix15(1) ;    // maximum amplitude
+fix15 max_noise_amplitude = 180 ;    // maximum noise amplitude
 fix15 attack_inc ;                      // rate at which sound ramps up
 fix15 decay_inc ;                       // rate at which sound ramps down
-fix15 mod_attack_inc ;                      // rate at which sound ramps up
-fix15 mod_decay_inc ;                       // rate at which sound ramps down
+volatile fix15 mod_attack_inc ;                      // rate at which sound ramps up
+volatile fix15 mod_decay_inc ;                       // rate at which sound ramps down
+fix15 noise_attack_inc ;                      // rate at which sound ramps up
+fix15 noise_decay_inc ;                       // rate at which sound ramps down
 fix15 current_amplitude_0 = 0 ;         // current amplitude (modified in ISR)
+fix15 noise_amplitude = 0 ;         // current amplitude (modified in ISR)
 fix15 current_amplitude_1 = 0 ;         // current amplitude (modified in ISR)
 
 // Timing parameters for beeps (units of interrupts)
-#define MOD_ATTACK_TIME         60
-#define ATTACK_TIME             140
+#define NOTE_DELAY             1000
+
+#define NOISE_ATTACK            250
+#define PITCH_ATTACK            200
+#define MOD_ATTACK_TIME         90
+#define ATTACK_TIME             160
+
+#define NOISE_DECAY             240
+#define PITCH_DECAY             200
 #define MOD_DECAY_TIME          320
 #define DECAY_TIME              220
-#define BEEP_DURATION           100000
 
 // State machine variables
 volatile unsigned int STATE_0 = 0 ;
@@ -125,7 +135,7 @@ volatile fix15 current_mod_depth ;
 volatile unsigned int mod_inc, main_inc ;
 volatile unsigned int mod_accum, main_accum ;
 volatile bool button_ready = true;
-fix15 max_mod_depth = 20000;
+volatile fix15 max_mod_depth = 200000;
 volatile fix15 current_mod_depth = 2000;
 fix15 octave_num = 4;
 fix15 Fmod = 3.0;
@@ -136,35 +146,53 @@ fix15 mod_wave, main_wave ;
 // This timer ISR is called on core 0
 bool repeating_timer_callback_core_0(struct repeating_timer *t) {
 
+    // DDS phase and sine table lookup
+    phase_accum_main_0 += phase_incr_main_0  ;
+    // float swoop_freq = -260*sine_table[];
+
+    float current_note = 250.0 + 900.0*pitch*pitch;
+
+    Fmod = 3.0 + 1.0*pitch;
+    main_inc = current_note * pow(2,32 )/ Fs ;
+    mod_inc = Fmod * current_note * pow(2,32 )/ Fs ;
+
+    // compute modulating wave
+    mod_accum += mod_inc ;
+    mod_wave = sine_table[mod_accum>>24] ;
+
+    // set dds main freq and FM modulate it
+    main_accum += main_inc + (unsigned int) multfix15(mod_wave, current_mod_depth) ;
+    // update main waveform
+    main_wave = sine_table[main_accum>>24] + noise_amplitude*(rand() % 100 - 50);
+
     if (STATE_0 == 0){
-
-        // DDS phase and sine table lookup
-        phase_accum_main_0 += phase_incr_main_0  ;
-        // float swoop_freq = -260*sine_table[];
-
-        float current_note = 20.0 + 500.0*pitch;
-        main_inc = current_note * pow(2,32 )/ Fs ;
-        mod_inc = Fmod * current_note * pow(2,32 )/ Fs ;
-
-        // compute modulating wave
-        mod_accum += mod_inc ;
-        mod_wave = sine_table[mod_accum>>24] ;
-
-        // set dds main freq and FM modulate it
-        main_accum += main_inc + (unsigned int) multfix15(mod_wave, current_mod_depth) ;
-        // update main waveform
-        main_wave = sine_table[main_accum>>24] ;
 
         DAC_output_0 = fix2int15(multfix15(current_amplitude_0,
             main_wave)) + 2048 ; // limit to amp
 
+        if (count_0 < NOTE_DELAY) {
+            current_amplitude_0 = 0 ;
+        }
+
         // Ramp up amplitude
-        if (count_0 < ATTACK_TIME) {
+        else if (count_0 < ATTACK_TIME + NOTE_DELAY) {
             current_amplitude_0 = (current_amplitude_0 + attack_inc) ;
         }
 
-        if (count_0 < MOD_ATTACK_TIME) {
+        if ( count_0 > NOTE_DELAY && count_0 < MOD_ATTACK_TIME + NOTE_DELAY) {
             current_mod_depth = current_mod_depth + mod_attack_inc;
+        }
+
+        if (count_0 < NOISE_ATTACK) {
+            noise_amplitude = noise_amplitude + noise_attack_inc;
+        }
+
+        else if (count_0 < NOISE_ATTACK + NOISE_DECAY) {
+            noise_amplitude = noise_amplitude - noise_decay_inc;
+        }
+
+        else {
+            noise_amplitude = 0;
         }
 
         // Mask with DAC control bits
@@ -181,23 +209,6 @@ bool repeating_timer_callback_core_0(struct repeating_timer *t) {
 
     // note ending
     if (STATE_0 == 1){
-
-        // DDS phase and sine table lookup
-        phase_accum_main_0 += phase_incr_main_0  ;
-        // float swoop_freq = -260*sine_table[];
-
-        float current_note = 20.0 + 500.0*pitch;
-        main_inc = current_note * pow(2,32 )/ Fs ;
-        mod_inc = Fmod * current_note * pow(2,32 )/ Fs ;
-
-        // compute modulating wave
-        mod_accum += mod_inc ;
-        mod_wave = sine_table[mod_accum>>24] ;
-
-        // set dds main freq and FM modulate it
-        main_accum += main_inc + (unsigned int) multfix15(mod_wave, current_mod_depth) ;
-        // update main waveform
-        main_wave = sine_table[main_accum>>24] ;
 
         DAC_output_0 = fix2int15(multfix15(current_amplitude_0,
             main_wave)) + 2048 ; // limit to amp
@@ -267,6 +278,10 @@ static PT_THREAD (protothread_core_0(struct pt *pt))
     PT_BEGIN(pt) ;
     while(1) {
         pitch = (float)adc_read() / 4095.0f;
+        // more modulation depth lower notes?
+        max_mod_depth = 80000 + 9000*(1-pitch);
+        mod_attack_inc = divfix(max_mod_depth, int2fix15(MOD_ATTACK_TIME));
+        mod_decay_inc = divfix(max_mod_depth, int2fix15(MOD_DECAY_TIME)) ;
         PT_YIELD_usec(500) ;
     }
     // Indicate thread end
@@ -319,8 +334,8 @@ int main() {
     attack_inc = divfix(max_amplitude, int2fix15(ATTACK_TIME)) ;
     decay_inc =  divfix(max_amplitude, int2fix15(DECAY_TIME)) ;
 
-    mod_attack_inc = divfix(max_mod_depth, int2fix15(MOD_ATTACK_TIME));
-    mod_decay_inc = divfix(max_mod_depth, int2fix15(MOD_DECAY_TIME)) ;
+    noise_attack_inc = divfix(max_noise_amplitude, int2fix15(NOISE_ATTACK));
+    noise_decay_inc = divfix(max_noise_amplitude, int2fix15(NOISE_DECAY)) ;
 
     // Build the sine lookup table
     // scaled to produce values between 0 and 4096 (for 12-bit DAC)
