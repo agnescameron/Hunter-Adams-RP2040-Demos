@@ -73,6 +73,8 @@ volatile fix15 mod_attack_inc ;                      // rate at which sound ramp
 volatile fix15 mod_decay_inc ;                       // rate at which sound ramps down
 fix15 noise_attack_inc ;                      // rate at which sound ramps up
 fix15 noise_decay_inc ;                       // rate at which sound ramps down
+fix15 pitch_attack_inc ;                      // rate at which sound ramps up
+fix15 pitch_decay_inc ;                       // rate at which sound ramps down
 fix15 current_amplitude_0 = 0 ;         // current amplitude (modified in ISR)
 fix15 noise_amplitude = 0 ;         // current amplitude (modified in ISR)
 fix15 current_amplitude_1 = 0 ;         // current amplitude (modified in ISR)
@@ -137,6 +139,8 @@ volatile unsigned int mod_accum, main_accum ;
 volatile bool button_ready = true;
 volatile fix15 max_mod_depth = 200000;
 volatile fix15 current_mod_depth = 2000;
+volatile fix15 max_pitch_bend = 2000;
+volatile fix15 pitch_bend = 0;
 fix15 octave_num = 4;
 fix15 Fmod = 3.0;
 
@@ -161,7 +165,7 @@ bool repeating_timer_callback_core_0(struct repeating_timer *t) {
     mod_wave = sine_table[mod_accum>>24] ;
 
     // set dds main freq and FM modulate it
-    main_accum += main_inc + (unsigned int) multfix15(mod_wave, current_mod_depth) ;
+    main_accum += main_inc + pitch_bend + (unsigned int) multfix15(mod_wave, current_mod_depth) ;
     // update main waveform
     main_wave = sine_table[main_accum>>24] + noise_amplitude*(rand() % 100 - 50);
 
@@ -181,6 +185,14 @@ bool repeating_timer_callback_core_0(struct repeating_timer *t) {
 
         if ( count_0 > NOTE_DELAY && count_0 < MOD_ATTACK_TIME + NOTE_DELAY) {
             current_mod_depth = current_mod_depth + mod_attack_inc;
+        }
+
+        if ( count_0 > NOTE_DELAY && count_0 < PITCH_ATTACK + NOTE_DELAY) {
+            pitch_bend = pitch_bend + pitch_attack_inc;
+        }
+
+        else if ( count_0 > PITCH_ATTACK + NOTE_DELAY && count_0 < PITCH_ATTACK + NOTE_DELAY + PITCH_DECAY) {
+            pitch_bend = pitch_bend - pitch_decay_inc;
         }
 
         if (count_0 < NOISE_ATTACK) {
@@ -336,6 +348,9 @@ int main() {
 
     noise_attack_inc = divfix(max_noise_amplitude, int2fix15(NOISE_ATTACK));
     noise_decay_inc = divfix(max_noise_amplitude, int2fix15(NOISE_DECAY)) ;
+
+    pitch_attack_inc = divfix(max_pitch_bend, int2fix15(PITCH_ATTACK));
+    pitch_decay_inc = divfix(max_pitch_bend, int2fix15(PITCH_DECAY));
 
     // Build the sine lookup table
     // scaled to produce values between 0 and 4096 (for 12-bit DAC)
