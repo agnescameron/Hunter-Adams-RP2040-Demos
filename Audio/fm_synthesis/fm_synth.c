@@ -26,9 +26,11 @@
 #include <string.h>
 #include "pico/stdlib.h"
 #include "pico/multicore.h"
+#include "pico/time.h"
 #include "hardware/spi.h"
 #include "hardware/gpio.h"
 #include "hardware/sync.h"
+#include "hardware/adc.h"
 // Include protothreads
 #include "pt_cornell_rp2040_v1.h"
 
@@ -66,29 +68,27 @@ int DAC_output_1 ;
 fix15 max_amplitude = int2fix15(1) ;    // maximum amplitude
 fix15 attack_inc ;                      // rate at which sound ramps up
 fix15 decay_inc ;                       // rate at which sound ramps down
-fix15 chirp_attack_inc ;                      // rate at which sound ramps up
-fix15 chirp_decay_inc ;                       // rate at which sound ramps down
+fix15 mod_attack_inc ;                      // rate at which sound ramps up
+fix15 mod_decay_inc ;                       // rate at which sound ramps down
 fix15 current_amplitude_0 = 0 ;         // current amplitude (modified in ISR)
 fix15 current_amplitude_1 = 0 ;         // current amplitude (modified in ISR)
 
 // Timing parameters for beeps (units of interrupts)
-#define ATTACK_TIME             40
-#define DECAY_TIME              40
-#define CHIRP_ATTACK            1500
-#define CHIRP_DECAY             1000
-#define SUSTAIN_TIME            400
+#define MOD_ATTACK_TIME         60
+#define ATTACK_TIME             140
+#define MOD_DECAY_TIME          320
+#define DECAY_TIME              220
 #define BEEP_DURATION           100000
-#define BEEP_REPEAT_INTERVAL    680
-#define BEEPS_PER_CHIRP         8
-#define CHIRP_INTERVAL          20000
-
-uint16_t CHIRP_DURATION = BEEP_REPEAT_INTERVAL*BEEPS_PER_CHIRP;
 
 // State machine variables
 volatile unsigned int STATE_0 = 0 ;
 volatile unsigned int STATE_1 = 0 ;
 volatile unsigned int count_0 = 0 ;
 volatile unsigned int count_1 = 0 ;
+
+// debouncing
+absolute_time_t last_press_time;
+const int debounce_ms = 60;
 
 // SPI data
 uint16_t DAC_data_1 ; // output value
@@ -107,6 +107,7 @@ uint16_t DAC_data_0 ; // output value
 #define PIN_MOSI 7
 #define LDAC     8
 #define LED      25
+#define PITCH     26
 #define BUTTON   0
 #define SPI_PORT spi0
 
@@ -116,13 +117,18 @@ volatile int corenum_0  ;
 // Global counter for spinlock experimenting
 volatile int global_counter = 0 ;
 
+// adc pitch value
+volatile float pitch = 0.1;
+
 float note = 130.8;
-fix15 max_mod_depth, current_mod_depth ; 
-unsigned int mod_inc, main_inc ;
-unsigned int mod_accum, main_accum ;
-fix15 current_mod_depth = 70000;
+volatile fix15 current_mod_depth ; 
+volatile unsigned int mod_inc, main_inc ;
+volatile unsigned int mod_accum, main_accum ;
+volatile bool button_ready = true;
+fix15 max_mod_depth = 20000;
+volatile fix15 current_mod_depth = 2000;
 fix15 octave_num = 4;
-fix15 Fmod = 2;
+fix15 Fmod = 3.0;
 
 fix15 mod_wave, main_wave ;
 
@@ -136,7 +142,7 @@ bool repeating_timer_callback_core_0(struct repeating_timer *t) {
         phase_accum_main_0 += phase_incr_main_0  ;
         // float swoop_freq = -260*sine_table[];
 
-        float current_note = 500.0 ;
+        float current_note = 20.0 + 500.0*pitch;
         main_inc = current_note * pow(2,32 )/ Fs ;
         mod_inc = Fmod * current_note * pow(2,32 )/ Fs ;
 
@@ -149,8 +155,61 @@ bool repeating_timer_callback_core_0(struct repeating_timer *t) {
         // update main waveform
         main_wave = sine_table[main_accum>>24] ;
 
-        DAC_output_0 = fix2int15(multfix15(max_amplitude,
+        DAC_output_0 = fix2int15(multfix15(current_amplitude_0,
             main_wave)) + 2048 ; // limit to amp
+
+        // Ramp up amplitude
+        if (count_0 < ATTACK_TIME) {
+            current_amplitude_0 = (current_amplitude_0 + attack_inc) ;
+        }
+
+        if (count_0 < MOD_ATTACK_TIME) {
+            current_mod_depth = current_mod_depth + mod_attack_inc;
+        }
+
+        // Mask with DAC control bits
+        DAC_data_0 = (DAC_config_chan_B | (DAC_output_0 & 0xffff))  ;
+
+        // SPI write (no spinlock b/c of SPI buffer)
+        spi_write16_blocking(SPI_PORT, &DAC_data_0, 1) ;
+
+        // Increment the counter
+        count_0 += 1 ;
+
+    }
+
+
+    // note ending
+    if (STATE_0 == 1){
+
+        // DDS phase and sine table lookup
+        phase_accum_main_0 += phase_incr_main_0  ;
+        // float swoop_freq = -260*sine_table[];
+
+        float current_note = 20.0 + 500.0*pitch;
+        main_inc = current_note * pow(2,32 )/ Fs ;
+        mod_inc = Fmod * current_note * pow(2,32 )/ Fs ;
+
+        // compute modulating wave
+        mod_accum += mod_inc ;
+        mod_wave = sine_table[mod_accum>>24] ;
+
+        // set dds main freq and FM modulate it
+        main_accum += main_inc + (unsigned int) multfix15(mod_wave, current_mod_depth) ;
+        // update main waveform
+        main_wave = sine_table[main_accum>>24] ;
+
+        DAC_output_0 = fix2int15(multfix15(current_amplitude_0,
+            main_wave)) + 2048 ; // limit to amp
+
+        // Ramp down amplitude
+        if (count_0 < DECAY_TIME) {
+            current_amplitude_0 = (current_amplitude_0 - decay_inc) ;
+        }
+
+        if (count_0 < MOD_DECAY_TIME) {
+            current_mod_depth = current_mod_depth - mod_decay_inc ;
+        }
 
         // Mask with DAC control bits
         DAC_data_0 = (DAC_config_chan_B | (DAC_output_0 & 0xffff))  ;
@@ -162,12 +221,12 @@ bool repeating_timer_callback_core_0(struct repeating_timer *t) {
         count_0 += 1 ;
         
         // State transition?
-        if (count_0 == BEEP_DURATION) {
-            STATE_0 = 1 ;
+        if (count_0 == DECAY_TIME) {
+            STATE_0 = 2 ;
         }
 
-
     }
+
 
     // retrieve core number of execution
     corenum_0 = get_core_num();
@@ -175,12 +234,31 @@ bool repeating_timer_callback_core_0(struct repeating_timer *t) {
     return true;
 }
 
-// GPIO ISR. Toggles LED
-void gpio_callback() {
-    count_0 = 0;
-    STATE_0 = 0;
-}
 
+void button_callback(uint gpio, uint32_t events) {
+    static absolute_time_t last_time;
+
+    absolute_time_t now = get_absolute_time();
+
+    // debounce
+    if (absolute_time_diff_us(last_time, now) < 5000) return;
+    last_time = now;
+
+    // read actual pin state
+    if (gpio_get(0) && STATE_0 != 0) {
+        // play the note
+        count_0 = 0;
+        mod_accum = 0;
+        main_accum = 0;
+        current_mod_depth = 0;
+        current_amplitude_0 = 0;
+        STATE_0 = 0;
+    } else if (STATE_0 == 0) {
+        //end the note
+        count_0 = 0;
+        STATE_0 = 1;
+    }
+}
 
 // This thread runs on core 0
 static PT_THREAD (protothread_core_0(struct pt *pt))
@@ -188,11 +266,8 @@ static PT_THREAD (protothread_core_0(struct pt *pt))
     // Indicate thread beginning
     PT_BEGIN(pt) ;
     while(1) {
-        
-        // Toggle on LED
-        gpio_put(LED, !gpio_get(LED)) ;
-        // Yield for 500 ms
-        PT_YIELD_usec(500000) ;
+        pitch = (float)adc_read() / 4095.0f;
+        PT_YIELD_usec(500) ;
     }
     // Indicate thread end
     PT_END(pt) ;
@@ -217,8 +292,10 @@ int main() {
     gpio_set_function(PIN_MOSI, GPIO_FUNC_SPI);
     gpio_set_function(PIN_CS, GPIO_FUNC_SPI) ;
 
-        // Configure GPIO interrupt
-    gpio_set_irq_enabled_with_callback(0, GPIO_IRQ_EDGE_RISE, true, &gpio_callback);
+    // Configure GPIO interrupt
+    gpio_set_irq_enabled_with_callback(0, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true, &button_callback);
+    // // Configure GPIO interrupt
+    // gpio_set_irq_enabled_with_callback(0, GPIO_IRQ_EDGE_FALL, true, &end_note);
 
     // Map LDAC pin to GPIO port, hold it low (could alternatively tie to GND)
     gpio_init(LDAC) ;
@@ -234,12 +311,17 @@ int main() {
     gpio_set_dir(BUTTON, GPIO_IN);
     gpio_pull_down(0);
 
+    adc_init();
+    adc_gpio_init(26);
+    adc_select_input(0);
+
     // set up increments for calculating bow envelope
     attack_inc = divfix(max_amplitude, int2fix15(ATTACK_TIME)) ;
     decay_inc =  divfix(max_amplitude, int2fix15(DECAY_TIME)) ;
 
-    chirp_attack_inc = divfix(max_amplitude, int2fix15(CHIRP_ATTACK)) ;
-    chirp_decay_inc = divfix(max_amplitude, int2fix15(CHIRP_DECAY)) ;
+    mod_attack_inc = divfix(max_mod_depth, int2fix15(MOD_ATTACK_TIME));
+    mod_decay_inc = divfix(max_mod_depth, int2fix15(MOD_DECAY_TIME)) ;
+
     // Build the sine lookup table
     // scaled to produce values between 0 and 4096 (for 12-bit DAC)
     int ii;
