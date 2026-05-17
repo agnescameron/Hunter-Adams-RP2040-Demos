@@ -131,6 +131,7 @@ volatile int global_counter = 0 ;
 
 // adc pitch value
 volatile float pitch = 0.1;
+volatile float depth = 0.1;
 
 float note = 130.8;
 volatile fix15 current_mod_depth ; 
@@ -146,9 +147,40 @@ fix15 Fmod = 3.0;
 
 fix15 mod_wave, main_wave ;
 
+volatile bool button_pressed = false;
+volatile bool button_changed = false;
+
 
 // This timer ISR is called on core 0
 bool repeating_timer_callback_core_0(struct repeating_timer *t) {
+
+    // note press-release logic
+    if (button_changed) {
+
+        button_changed = false;
+
+        // button pressed
+        if (button_pressed) {
+
+            count_0 = 0;
+            mod_accum = 0;
+            main_accum = 0;
+
+            current_mod_depth = 0;
+            current_amplitude_0 = 0;
+
+            noise_amplitude = 0;
+            pitch_bend = 0;
+
+            STATE_0 = 0;
+        }
+
+        // button released
+        else {
+            count_0 = 0;
+            STATE_0 = 1;
+        }
+    }
 
     // DDS phase and sine table lookup
     phase_accum_main_0 += phase_incr_main_0  ;
@@ -158,6 +190,8 @@ bool repeating_timer_callback_core_0(struct repeating_timer *t) {
 
     Fmod = 3.0 + 1.0*pitch;
     main_inc = current_note * pow(2,32 )/ Fs ;
+
+    // modulate mod_inc here?
     mod_inc = Fmod * current_note * pow(2,32 )/ Fs ;
 
     // compute modulating wave
@@ -167,7 +201,7 @@ bool repeating_timer_callback_core_0(struct repeating_timer *t) {
     // set dds main freq and FM modulate it
     main_accum += main_inc + pitch_bend + (unsigned int) multfix15(mod_wave, current_mod_depth) ;
     // update main waveform
-    main_wave = sine_table[main_accum>>24] + noise_amplitude*(rand() % 100 - 50);
+    main_wave = sine_table[main_accum>>24] + noise_amplitude*(rand() % 10 - 5);
 
     if (STATE_0 == 0){
 
@@ -259,28 +293,29 @@ bool repeating_timer_callback_core_0(struct repeating_timer *t) {
 
 
 void button_callback(uint gpio, uint32_t events) {
+
     static absolute_time_t last_time;
+    static bool last_state = false;
 
     absolute_time_t now = get_absolute_time();
 
-    // debounce
-    if (absolute_time_diff_us(last_time, now) < 5000) return;
-    last_time = now;
+    bool current_state = gpio_get(0);
 
-    // read actual pin state
-    if (gpio_get(0) && STATE_0 != 0) {
-        // play the note
-        count_0 = 0;
-        mod_accum = 0;
-        main_accum = 0;
-        current_mod_depth = 0;
-        current_amplitude_0 = 0;
-        STATE_0 = 0;
-    } else if (STATE_0 == 0) {
-        //end the note
-        count_0 = 0;
-        STATE_0 = 1;
+    // Ignore repeated interrupts with same state
+    if (current_state == last_state) {
+        return;
     }
+
+    // debounce only rapid toggles
+    if (absolute_time_diff_us(last_time, now) < 20000) {
+        return;
+    }
+
+    last_time = now;
+    last_state = current_state;
+
+    button_pressed = current_state;
+    button_changed = true;
 }
 
 // This thread runs on core 0
@@ -289,9 +324,16 @@ static PT_THREAD (protothread_core_0(struct pt *pt))
     // Indicate thread beginning
     PT_BEGIN(pt) ;
     while(1) {
+        // dial
+        adc_select_input(0);
         pitch = (float)adc_read() / 4095.0f;
+
+        // mouthpiece
+        adc_select_input(1);
+        depth = (float)adc_read() / 4095.0f;
+
         // more modulation depth lower notes?
-        max_mod_depth = 80000 + 9000*(1-pitch);
+        current_mod_depth = 50000 + 200000*depth;//50000.0 + 50000.0*depth;
         mod_attack_inc = divfix(max_mod_depth, int2fix15(MOD_ATTACK_TIME));
         mod_decay_inc = divfix(max_mod_depth, int2fix15(MOD_DECAY_TIME)) ;
         PT_YIELD_usec(500) ;
@@ -339,7 +381,11 @@ int main() {
     gpio_pull_down(0);
 
     adc_init();
+
+    // how to read multiple adc inputs?
+    // add in mod depth 
     adc_gpio_init(26);
+    adc_gpio_init(27);
     adc_select_input(0);
 
     // set up increments for calculating bow envelope
