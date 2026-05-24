@@ -88,11 +88,10 @@ fix15 current_amplitude_1 = 0 ;         // current amplitude (modified in ISR)
 #define NOISE_DECAY             240
 #define PITCH_DECAY             500
 #define MOD_DECAY_TIME          320
-#define DECAY_TIME              220
+#define DECAY_TIME              520
 
 // State machine variables
 volatile unsigned int STATE_0 = 2 ;
-volatile unsigned int STATE_1 = 0 ;
 volatile unsigned int count_0 = 0 ;
 volatile unsigned int count_1 = 0 ;
 
@@ -133,6 +132,7 @@ volatile int global_counter = 0 ;
 // adc pitch value
 volatile float pitch = 0.1;
 volatile float depth = 0.1;
+volatile int decay_ext = 3000;
 
 float note = 130.8;
 volatile fix15 current_mod_depth ; 
@@ -206,7 +206,8 @@ bool repeating_timer_callback_core_0(struct repeating_timer *t) {
     // update main waveform
     main_wave = sine_table[main_accum>>24] + noise_amplitude*(rand() % 10 - 5);
 
-
+    // note start and sustain
+    // add a poll for button still pressed?
     if (STATE_0 == 0){
 
         DAC_output_0 = fix2int15(multfix15(current_amplitude_0,
@@ -259,9 +260,7 @@ bool repeating_timer_callback_core_0(struct repeating_timer *t) {
 
         // Increment the counter
         count_0 += 1 ;
-
     }
-
 
     // note ending
     if (STATE_0 == 1){
@@ -270,14 +269,14 @@ bool repeating_timer_callback_core_0(struct repeating_timer *t) {
             main_wave)) + 2048 ; // limit to amp
 
         // Ramp down amplitude
-        if (count_0 < DECAY_TIME) {
+        if (count_0 < DECAY_TIME + decay_ext) {
             current_amplitude_0 = (current_amplitude_0 - decay_inc) ;
             if(current_amplitude_0 < 0) {
                 current_amplitude_0 = 0;
             }
         }
 
-        if (count_0 < MOD_DECAY_TIME) {
+        if (count_0 < MOD_DECAY_TIME + decay_ext) {
             current_mod_depth = current_mod_depth - mod_decay_inc ;
             if(current_mod_depth < 0){
                 current_mod_depth = 0;
@@ -294,12 +293,19 @@ bool repeating_timer_callback_core_0(struct repeating_timer *t) {
         count_0 += 1 ;
         
         // State transition?
-        if (count_0 == DECAY_TIME) {
+        if (count_0 == DECAY_TIME + decay_ext) {
             STATE_0 = 2 ;
         }
 
     }
 
+    // silent
+    if (STATE_0 == 2) {
+        current_mod_depth = 0;
+        current_amplitude_0 = 0;
+        noise_amplitude = 0;
+        pitch_bend = 0;
+    }
 
     // retrieve core number of execution
     corenum_0 = get_core_num();
@@ -347,6 +353,10 @@ static PT_THREAD (protothread_core_0(struct pt *pt))
         // mouthpiece -- invert
         adc_select_input(1);
         depth = 1.0 - (float)adc_read() / 4095.0f;
+        float decay_mult = depth - 0.4;
+        if (decay_mult < 0) decay_mult = 0;
+
+        decay_ext = decay_mult*30000.0;
 
         // more modulation depth lower notes?
         current_mod_depth = 70000 + 140000*depth*depth - 40000*pitch*pitch;
@@ -358,7 +368,7 @@ static PT_THREAD (protothread_core_0(struct pt *pt))
 
         // set up increments for calculating envelope
         attack_inc = divfix(max_amplitude, int2fix15(ATTACK_TIME)) ;
-        decay_inc =  divfix(max_amplitude, int2fix15(DECAY_TIME)) ;
+        decay_inc =  divfix(max_amplitude, int2fix15(DECAY_TIME + decay_ext)) ;
 
         noise_attack_inc = divfix(max_noise_amplitude, int2fix15(NOISE_ATTACK));
         noise_decay_inc = divfix(max_noise_amplitude, int2fix15(NOISE_DECAY)) ;
