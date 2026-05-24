@@ -84,8 +84,6 @@ fix15 current_amplitude_1 = 0 ;         // current amplitude (modified in ISR)
 
 #define NOISE_ATTACK            250
 #define PITCH_ATTACK            500
-#define MOD_ATTACK_TIME         90
-#define ATTACK_TIME             160
 
 #define NOISE_DECAY             240
 #define PITCH_DECAY             500
@@ -93,10 +91,13 @@ fix15 current_amplitude_1 = 0 ;         // current amplitude (modified in ISR)
 #define DECAY_TIME              220
 
 // State machine variables
-volatile unsigned int STATE_0 = 0 ;
+volatile unsigned int STATE_0 = 2 ;
 volatile unsigned int STATE_1 = 0 ;
 volatile unsigned int count_0 = 0 ;
 volatile unsigned int count_1 = 0 ;
+
+volatile unsigned int MOD_ATTACK_TIME = 90;
+volatile unsigned int ATTACK_TIME = 160;
 
 // debouncing
 absolute_time_t last_press_time;
@@ -198,10 +199,13 @@ bool repeating_timer_callback_core_0(struct repeating_timer *t) {
     mod_accum += mod_inc ;
     mod_wave = sine_table[mod_accum>>24] ;
 
+    int fm = multfix15(mod_wave, current_mod_depth);
+
     // set dds main freq and FM modulate it
-    main_accum += main_inc + pitch_bend + (unsigned int) multfix15(mod_wave, current_mod_depth) ;
+    main_accum += main_inc + pitch_bend + fm;
     // update main waveform
     main_wave = sine_table[main_accum>>24] + noise_amplitude*(rand() % 10 - 5);
+
 
     if (STATE_0 == 0){
 
@@ -227,6 +231,9 @@ bool repeating_timer_callback_core_0(struct repeating_timer *t) {
 
         else if ( count_0 > PITCH_ATTACK + NOTE_DELAY && count_0 < PITCH_ATTACK + NOTE_DELAY + PITCH_DECAY) {
             pitch_bend = pitch_bend - pitch_decay_inc;
+            if (pitch_bend < 0){
+                pitch_bend = 0;
+            }
         }
 
         if (count_0 < NOISE_ATTACK) {
@@ -235,6 +242,9 @@ bool repeating_timer_callback_core_0(struct repeating_timer *t) {
 
         else if (count_0 < NOISE_ATTACK + NOISE_DECAY) {
             noise_amplitude = noise_amplitude - noise_decay_inc;
+            if (noise_amplitude < 0) {
+                noise_amplitude = 0;
+            }
         }
 
         else {
@@ -262,10 +272,16 @@ bool repeating_timer_callback_core_0(struct repeating_timer *t) {
         // Ramp down amplitude
         if (count_0 < DECAY_TIME) {
             current_amplitude_0 = (current_amplitude_0 - decay_inc) ;
+            if(current_amplitude_0 < 0) {
+                current_amplitude_0 = 0;
+            }
         }
 
         if (count_0 < MOD_DECAY_TIME) {
             current_mod_depth = current_mod_depth - mod_decay_inc ;
+            if(current_mod_depth < 0){
+                current_mod_depth = 0;
+            }
         }
 
         // Mask with DAC control bits
@@ -328,12 +344,28 @@ static PT_THREAD (protothread_core_0(struct pt *pt))
         adc_select_input(0);
         pitch = (float)adc_read() / 4095.0f;
 
-        // mouthpiece
+        // mouthpiece -- invert
         adc_select_input(1);
-        depth = (float)adc_read() / 4095.0f;
+        depth = 1.0 - (float)adc_read() / 4095.0f;
 
         // more modulation depth lower notes?
-        current_mod_depth = 50000 + 200000*depth;//50000.0 + 50000.0*depth;
+        current_mod_depth = 70000 + 140000*depth*depth - 40000*pitch*pitch;
+
+        ATTACK_TIME = 150 + 50*depth*depth + 20*pitch*pitch;
+        MOD_ATTACK_TIME = 80 + 60*depth*depth;
+
+        max_noise_amplitude = 200 - 120*pitch*pitch;
+
+        // set up increments for calculating envelope
+        attack_inc = divfix(max_amplitude, int2fix15(ATTACK_TIME)) ;
+        decay_inc =  divfix(max_amplitude, int2fix15(DECAY_TIME)) ;
+
+        noise_attack_inc = divfix(max_noise_amplitude, int2fix15(NOISE_ATTACK));
+        noise_decay_inc = divfix(max_noise_amplitude, int2fix15(NOISE_DECAY)) ;
+
+        pitch_attack_inc = divfix(max_pitch_bend, int2fix15(PITCH_ATTACK));
+        pitch_decay_inc = divfix(max_pitch_bend, int2fix15(PITCH_DECAY));
+
         mod_attack_inc = divfix(max_mod_depth, int2fix15(MOD_ATTACK_TIME));
         mod_decay_inc = divfix(max_mod_depth, int2fix15(MOD_DECAY_TIME)) ;
         PT_YIELD_usec(500) ;
@@ -387,16 +419,6 @@ int main() {
     adc_gpio_init(26);
     adc_gpio_init(27);
     adc_select_input(0);
-
-    // set up increments for calculating bow envelope
-    attack_inc = divfix(max_amplitude, int2fix15(ATTACK_TIME)) ;
-    decay_inc =  divfix(max_amplitude, int2fix15(DECAY_TIME)) ;
-
-    noise_attack_inc = divfix(max_noise_amplitude, int2fix15(NOISE_ATTACK));
-    noise_decay_inc = divfix(max_noise_amplitude, int2fix15(NOISE_DECAY)) ;
-
-    pitch_attack_inc = divfix(max_pitch_bend, int2fix15(PITCH_ATTACK));
-    pitch_decay_inc = divfix(max_pitch_bend, int2fix15(PITCH_DECAY));
 
     // Build the sine lookup table
     // scaled to produce values between 0 and 4096 (for 12-bit DAC)
