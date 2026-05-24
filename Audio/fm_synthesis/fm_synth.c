@@ -374,11 +374,14 @@ static PT_THREAD (protothread_core_0(struct pt *pt))
 
         // mouthpiece -- invert
         adc_select_input(1);
+
+
+        // SMOOTHING FUNCTION
         depth = 1.0 - (float)adc_read() / 4095.0f;
         float decay_mult = depth - 0.1;
         if (decay_mult < 0) decay_mult = 0;
 
-        decay_ext = decay_mult*100000.0;
+        decay_ext = decay_mult*150000.0;
 
 
         // more modulation depth lower notes?
