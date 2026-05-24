@@ -66,7 +66,7 @@ int DAC_output_1 ;
 
 // Amplitude modulation parameters and variables
 fix15 max_amplitude = int2fix15(1) ;    // maximum amplitude
-fix15 max_noise_amplitude = 180 ;    // maximum noise amplitude
+fix15 max_noise_amplitude = 100 ;    // maximum noise amplitude
 fix15 attack_inc ;                      // rate at which sound ramps up
 fix15 decay_inc ;                       // rate at which sound ramps down
 volatile fix15 mod_attack_inc ;                      // rate at which sound ramps up
@@ -88,7 +88,7 @@ fix15 current_amplitude_1 = 0 ;         // current amplitude (modified in ISR)
 #define NOISE_DECAY             240
 #define PITCH_DECAY             500
 #define MOD_DECAY_TIME          320
-#define DECAY_TIME              520
+#define DECAY_TIME              820
 
 // State machine variables
 volatile unsigned int STATE_0 = 2 ;
@@ -148,36 +148,67 @@ fix15 Fmod = 3.0;
 
 fix15 mod_wave, main_wave ;
 
+
+// button logic
+static absolute_time_t last_time;
+static bool last_state = false;
 volatile bool button_pressed = false;
 volatile bool button_changed = false;
 
 
+void poll_button() {
+    bool current_state = gpio_get(0);
+
+    // Ignore repeated interrupts with same state
+    if (current_state == last_state) {
+        return;
+    }
+
+    last_state = current_state;
+    button_pressed = current_state;
+    button_changed = true;
+}
+
 // This timer ISR is called on core 0
 bool repeating_timer_callback_core_0(struct repeating_timer *t) {
 
-    // note press-release logic
-    if (button_changed) {
+    // poll the button every 20ms
+    absolute_time_t now = get_absolute_time();
 
-        button_changed = false;
+    if(absolute_time_diff_us(last_time, now) > 20000) {
+        last_time = now;
+        poll_button();
 
-        // button pressed
-        if (button_pressed) {
+        // note press-release logic
+        if (button_changed) {
 
-            count_0 = 0;
-            mod_accum = 0;
-            main_accum = 0;
+            button_changed = false;
 
-            current_mod_depth = 0;
-            current_amplitude_0 = 0;
+            // button pressed
+            if (button_pressed) {
 
-            noise_amplitude = 0;
-            pitch_bend = 0;
+                count_0 = 0;
+                mod_accum = 0;
+                main_accum = 0;
 
-            STATE_0 = 0;
+                current_mod_depth = 0;
+                current_amplitude_0 = 0;
+
+                noise_amplitude = 0;
+                pitch_bend = 0;
+
+                STATE_0 = 0;
+            }
+
+            // button released
+            else {
+                count_0 = 0;
+                STATE_0 = 1;
+            }
         }
 
-        // button released
-        else {
+        // get rid of floating state
+        if(!button_pressed && STATE_0 == 0) {
             count_0 = 0;
             STATE_0 = 1;
         }
@@ -199,16 +230,18 @@ bool repeating_timer_callback_core_0(struct repeating_timer *t) {
     mod_accum += mod_inc ;
     mod_wave = sine_table[mod_accum>>24] ;
 
-    int fm = multfix15(mod_wave, current_mod_depth);
+    fix15 fm = multfix15(mod_wave, current_mod_depth);
 
     // set dds main freq and FM modulate it
     main_accum += main_inc + pitch_bend + fm;
     // update main waveform
-    main_wave = sine_table[main_accum>>24] + noise_amplitude*(rand() % 10 - 5);
+    main_wave = sine_table[main_accum>>24] + int2fix15(noise_amplitude*((rand() % 10) - 5));
 
     // note start and sustain
     // add a poll for button still pressed?
     if (STATE_0 == 0){
+
+        if(current_amplitude_0 >= max_amplitude) current_amplitude_0 = max_amplitude;
 
         DAC_output_0 = fix2int15(multfix15(current_amplitude_0,
             main_wave)) + 2048 ; // limit to amp
@@ -239,6 +272,9 @@ bool repeating_timer_callback_core_0(struct repeating_timer *t) {
 
         if (count_0 < NOISE_ATTACK) {
             noise_amplitude = noise_amplitude + noise_attack_inc;
+            if (noise_amplitude >= max_noise_amplitude) {
+                noise_amplitude = max_noise_amplitude;
+            }
         }
 
         else if (count_0 < NOISE_ATTACK + NOISE_DECAY) {
@@ -265,20 +301,22 @@ bool repeating_timer_callback_core_0(struct repeating_timer *t) {
     // note ending
     if (STATE_0 == 1){
 
+        if(current_amplitude_0 >= max_amplitude) current_amplitude_0 = max_amplitude;
+
         DAC_output_0 = fix2int15(multfix15(current_amplitude_0,
             main_wave)) + 2048 ; // limit to amp
 
         // Ramp down amplitude
         if (count_0 < DECAY_TIME + decay_ext) {
             current_amplitude_0 = (current_amplitude_0 - decay_inc) ;
-            if(current_amplitude_0 < 0) {
+            if(current_amplitude_0 <= 0) {
                 current_amplitude_0 = 0;
             }
         }
 
         if (count_0 < MOD_DECAY_TIME + decay_ext) {
             current_mod_depth = current_mod_depth - mod_decay_inc ;
-            if(current_mod_depth < 0){
+            if(current_mod_depth <= 0){
                 current_mod_depth = 0;
             }
         }
@@ -292,19 +330,29 @@ bool repeating_timer_callback_core_0(struct repeating_timer *t) {
         // Increment the counter
         count_0 += 1 ;
         
-        // State transition?
-        if (count_0 == DECAY_TIME + decay_ext) {
+        // state transition
+        if (count_0 >= DECAY_TIME + decay_ext) {
             STATE_0 = 2 ;
+            DAC_output_0 = 2048;
         }
 
     }
 
-    // silent
+    // controllable decay
+
+    // non optional decay
+
+    // silence
     if (STATE_0 == 2) {
         current_mod_depth = 0;
         current_amplitude_0 = 0;
         noise_amplitude = 0;
         pitch_bend = 0;
+
+        DAC_output_0 = fix2int15(multfix15(0, main_wave)) + 2048 ; // limit to amp
+
+        DAC_data_0 = (DAC_config_chan_B | (DAC_output_0 & 0xffff))  ;
+        spi_write16_blocking(SPI_PORT, &DAC_data_0, 1) ;
     }
 
     // retrieve core number of execution
@@ -313,32 +361,6 @@ bool repeating_timer_callback_core_0(struct repeating_timer *t) {
     return true;
 }
 
-
-void button_callback(uint gpio, uint32_t events) {
-
-    static absolute_time_t last_time;
-    static bool last_state = false;
-
-    absolute_time_t now = get_absolute_time();
-
-    bool current_state = gpio_get(0);
-
-    // Ignore repeated interrupts with same state
-    if (current_state == last_state) {
-        return;
-    }
-
-    // debounce only rapid toggles
-    if (absolute_time_diff_us(last_time, now) < 20000) {
-        return;
-    }
-
-    last_time = now;
-    last_state = current_state;
-
-    button_pressed = current_state;
-    button_changed = true;
-}
 
 // This thread runs on core 0
 static PT_THREAD (protothread_core_0(struct pt *pt))
@@ -353,10 +375,11 @@ static PT_THREAD (protothread_core_0(struct pt *pt))
         // mouthpiece -- invert
         adc_select_input(1);
         depth = 1.0 - (float)adc_read() / 4095.0f;
-        float decay_mult = depth - 0.4;
+        float decay_mult = depth - 0.1;
         if (decay_mult < 0) decay_mult = 0;
 
-        decay_ext = decay_mult*30000.0;
+        decay_ext = decay_mult*100000.0;
+
 
         // more modulation depth lower notes?
         current_mod_depth = 70000 + 140000*depth*depth - 40000*pitch*pitch;
@@ -364,11 +387,11 @@ static PT_THREAD (protothread_core_0(struct pt *pt))
         ATTACK_TIME = 150 + 50*depth*depth + 20*pitch*pitch;
         MOD_ATTACK_TIME = 80 + 60*depth*depth;
 
-        max_noise_amplitude = 200 - 120*pitch*pitch;
+        max_noise_amplitude = 150 - 120*pitch*pitch;
 
         // set up increments for calculating envelope
         attack_inc = divfix(max_amplitude, int2fix15(ATTACK_TIME)) ;
-        decay_inc =  divfix(max_amplitude, int2fix15(DECAY_TIME + decay_ext)) ;
+        decay_inc =  divfix(max_amplitude, int2fix15(DECAY_TIME + decay_ext/2)) ;
 
         noise_attack_inc = divfix(max_noise_amplitude, int2fix15(NOISE_ATTACK));
         noise_decay_inc = divfix(max_noise_amplitude, int2fix15(NOISE_DECAY)) ;
@@ -377,7 +400,7 @@ static PT_THREAD (protothread_core_0(struct pt *pt))
         pitch_decay_inc = divfix(max_pitch_bend, int2fix15(PITCH_DECAY));
 
         mod_attack_inc = divfix(max_mod_depth, int2fix15(MOD_ATTACK_TIME));
-        mod_decay_inc = divfix(max_mod_depth, int2fix15(MOD_DECAY_TIME)) ;
+        mod_decay_inc = divfix(max_mod_depth, int2fix15(MOD_DECAY_TIME +  decay_ext/2)) ;
         PT_YIELD_usec(500) ;
     }
     // Indicate thread end
@@ -404,7 +427,7 @@ int main() {
     gpio_set_function(PIN_CS, GPIO_FUNC_SPI) ;
 
     // Configure GPIO interrupt
-    gpio_set_irq_enabled_with_callback(0, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true, &button_callback);
+    // gpio_set_irq_enabled_with_callback(0, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true, &button_callback);
     // // Configure GPIO interrupt
     // gpio_set_irq_enabled_with_callback(0, GPIO_IRQ_EDGE_FALL, true, &end_note);
 
