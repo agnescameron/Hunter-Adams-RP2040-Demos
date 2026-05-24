@@ -88,7 +88,7 @@ fix15 current_amplitude_1 = 0 ;         // current amplitude (modified in ISR)
 #define NOISE_DECAY             240
 #define PITCH_DECAY             500
 #define MOD_DECAY_TIME          320
-#define DECAY_TIME              820
+#define DECAY_TIME              1200
 
 // State machine variables
 volatile unsigned int STATE_0 = 2 ;
