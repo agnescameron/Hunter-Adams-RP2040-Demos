@@ -118,6 +118,8 @@ uint16_t DAC_data_0 ; // output value
 #define PIN_SCK  6
 #define PIN_MOSI 7
 #define LDAC     8
+
+
 #define LED      25
 #define PITCH     26
 #define BUTTON   0
@@ -243,9 +245,6 @@ bool repeating_timer_callback_core_0(struct repeating_timer *t) {
 
         if(current_amplitude_0 >= max_amplitude) current_amplitude_0 = max_amplitude;
 
-        DAC_output_0 = fix2int15(multfix15(current_amplitude_0,
-            main_wave)) + 2048 ; // limit to amp
-
         if (count_0 < NOTE_DELAY) {
             current_amplitude_0 = 0 ;
         }
@@ -287,6 +286,11 @@ bool repeating_timer_callback_core_0(struct repeating_timer *t) {
         else {
             noise_amplitude = 0;
         }
+
+        //MAIN SIGNAL
+        // moved this check is okay
+        DAC_output_0 = fix2int15(multfix15(current_amplitude_0,
+            main_wave)) + 2048 ; // limit to amp
 
         // Mask with DAC control bits
         DAC_data_0 = (DAC_config_chan_B | (DAC_output_0 & 0xffff))  ;
