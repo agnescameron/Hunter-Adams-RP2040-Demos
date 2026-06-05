@@ -359,6 +359,17 @@ bool repeating_timer_callback_core_0(struct repeating_timer *t) {
         spi_write16_blocking(SPI_PORT, &DAC_data_0, 1) ;
     }
 
+    ///MONITOR
+    // moved this check is okay
+    monitor_output = fix2int15(multfix15(max_amplitude/2,
+        main_wave)) + 2048 ; // limit to amp
+
+    // Mask with DAC control bits
+    DAC_data_1 = (DAC_config_chan_A | (monitor_output & 0xffff))  ;
+
+    // SPI write (no spinlock b/c of SPI buffer)
+    spi_write16_blocking(SPI_PORT, &DAC_data_1, 1);
+
     // retrieve core number of execution
     corenum_0 = get_core_num();
 
