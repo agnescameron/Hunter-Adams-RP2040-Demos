@@ -79,6 +79,8 @@ fix15 current_amplitude_0 = 0 ;         // current amplitude (modified in ISR)
 fix15 noise_amplitude = 0 ;         // current amplitude (modified in ISR)
 fix15 current_amplitude_1 = 0 ;         // current amplitude (modified in ISR)
 
+
+
 // Timing parameters for beeps (units of interrupts)
 #define NOTE_DELAY             1000
 
@@ -119,10 +121,10 @@ uint16_t DAC_data_0 ; // output value
 #define PIN_MOSI 7
 #define LDAC     8
 
-
 #define LED      25
 #define PITCH     26
 #define BUTTON   0
+#define BUF_CAP 30
 #define SPI_PORT spi0
 
 // Two variables to store core number
@@ -136,6 +138,11 @@ volatile float pitch = 0.1;
 volatile float depth = 0.1;
 volatile int decay_ext = 3000;
 
+// decay buffering
+uint16_t buf_ctr = 0;
+float decay_buffer[BUF_CAP] = {0.0};
+
+// note control
 float note = 130.8;
 volatile fix15 current_mod_depth ; 
 volatile unsigned int mod_inc, main_inc ;
@@ -241,6 +248,8 @@ bool repeating_timer_callback_core_0(struct repeating_timer *t) {
 
     // note start and sustain
     // add a poll for button still pressed?
+    // split out into 2 states so attack is separate and pressure controlled?
+
     if (STATE_0 == 0){
 
         if(current_amplitude_0 >= max_amplitude) current_amplitude_0 = max_amplitude;
@@ -361,11 +370,11 @@ bool repeating_timer_callback_core_0(struct repeating_timer *t) {
 
     ///MONITOR
     // moved this check is okay
-    monitor_output = fix2int15(multfix15(max_amplitude/2,
+    DAC_output_1 = fix2int15(multfix15(max_amplitude/2,
         main_wave)) + 2048 ; // limit to amp
 
     // Mask with DAC control bits
-    DAC_data_1 = (DAC_config_chan_A | (monitor_output & 0xffff))  ;
+    DAC_data_1 = (DAC_config_chan_A | (DAC_output_1 & 0xffff))  ;
 
     // SPI write (no spinlock b/c of SPI buffer)
     spi_write16_blocking(SPI_PORT, &DAC_data_1, 1);
@@ -393,10 +402,23 @@ static PT_THREAD (protothread_core_0(struct pt *pt))
 
         // SMOOTHING FUNCTION
         depth = 1.0 - (float)adc_read() / 4095.0f;
-        float decay_mult = depth - 0.1;
-        if (decay_mult < 0) decay_mult = 0;
+        float decay_mult_inst = depth - 0.1;
+        if (decay_mult_inst < 0) decay_mult_inst = 0;
 
-        decay_ext = decay_mult*150000.0;
+        // decay buffer
+        decay_buffer[buf_ctr] = decay_mult_inst;
+
+        float decay_total = 0.0;
+
+        for(int i=0; i<BUF_CAP; i++) {
+            decay_total += decay_buffer[i];
+        }
+
+        decay_ext = (decay_total/BUF_CAP)*150000.0;
+        buf_ctr +=1;
+        if(buf_ctr == BUF_CAP){
+            buf_ctr = 0;
+        }
 
 
         // more modulation depth lower notes?
