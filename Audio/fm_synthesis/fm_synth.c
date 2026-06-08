@@ -146,7 +146,7 @@ float decay_buffer[BUF_CAP] = {0.0};
 float note = 130.8;
 volatile fix15 current_mod_depth ; 
 volatile unsigned int mod_inc, main_inc ;
-volatile unsigned int mod_accum, main_accum ;
+volatile unsigned int mod_accum, main_accum, monitor_accum ;
 volatile bool button_ready = true;
 volatile fix15 max_mod_depth = 200000;
 volatile fix15 current_mod_depth = 2000;
@@ -243,6 +243,8 @@ bool repeating_timer_callback_core_0(struct repeating_timer *t) {
 
     // set dds main freq and FM modulate it
     main_accum += main_inc + pitch_bend + fm;
+    monitor_accum += main_inc;
+
     // update main waveform
     main_wave = sine_table[main_accum>>24] + int2fix15(noise_amplitude*((rand() % 10) - 5));
 
@@ -347,6 +349,8 @@ bool repeating_timer_callback_core_0(struct repeating_timer *t) {
         if (count_0 >= DECAY_TIME + decay_ext) {
             STATE_0 = 2 ;
             DAC_output_0 = 2048;
+            // DAC_output_0 = fix2int15(multfix15(0, main_wave)) + 2048 ; // limit to amp
+            spi_write16_blocking(SPI_PORT, &DAC_data_0, 1) ;
         }
 
     }
@@ -362,22 +366,22 @@ bool repeating_timer_callback_core_0(struct repeating_timer *t) {
         noise_amplitude = 0;
         pitch_bend = 0;
 
-        DAC_output_0 = fix2int15(multfix15(0, main_wave)) + 2048 ; // limit to amp
+        // DAC_output_0 = fix2int15(multfix15(0, main_wave)) + 2048 ; // limit to amp
 
-        DAC_data_0 = (DAC_config_chan_B | (DAC_output_0 & 0xffff))  ;
-        spi_write16_blocking(SPI_PORT, &DAC_data_0, 1) ;
+        // DAC_data_0 = (DAC_config_chan_B | (DAC_output_0 & 0xffff))  ;
+    //MONITOR
+        //moved this check is okay
+        DAC_output_1 = fix2int15(multfix15(max_amplitude, 
+            sine_table[monitor_accum>>24])) + 2048 ; // limit to amp
+
+        // Mask with DAC control bits
+        DAC_data_1 = (DAC_config_chan_A | (DAC_output_1 & 0xffff))  ;
+
+        // SPI write (no spinlock b/c of SPI buffer)
+        spi_write16_blocking(SPI_PORT, &DAC_data_1, 1);
+        // spi_write16_blocking(SPI_PORT, &DAC_data_0, 1) ;
     }
 
-    ///MONITOR
-    // moved this check is okay
-    DAC_output_1 = fix2int15(multfix15(max_amplitude/2,
-        main_wave)) + 2048 ; // limit to amp
-
-    // Mask with DAC control bits
-    DAC_data_1 = (DAC_config_chan_A | (DAC_output_1 & 0xffff))  ;
-
-    // SPI write (no spinlock b/c of SPI buffer)
-    spi_write16_blocking(SPI_PORT, &DAC_data_1, 1);
 
     // retrieve core number of execution
     corenum_0 = get_core_num();
