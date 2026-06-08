@@ -49,7 +49,7 @@ typedef signed int fix15 ;
 
 //Direct Digital Synthesis (DDS) parameters
 #define two32 4294967296.0  // 2^32 (a constant)
-#define Fs 40000            // sample rate
+#define Fs 31250            // sample rate
 
 // the DDS units - core 0
 // Phase accumulator and phase increment. Increment sets output frequency.
@@ -124,7 +124,7 @@ uint16_t DAC_data_0 ; // output value
 #define LED      25
 #define PITCH     26
 #define BUTTON   0
-#define BUF_CAP 30
+#define BUF_CAP 50
 #define SPI_PORT spi0
 
 // Two variables to store core number
@@ -227,7 +227,7 @@ bool repeating_timer_callback_core_0(struct repeating_timer *t) {
     phase_accum_main_0 += phase_incr_main_0  ;
     // float swoop_freq = -260*sine_table[];
 
-    float current_note = 230.0 + 1000.0*pitch*pitch;
+    float current_note = 220.0 + 1500.0*pitch*pitch;
 
     Fmod = 3.0 + 1.0*pitch;
     main_inc = current_note * pow(2,32 )/ Fs ;
@@ -309,6 +309,12 @@ bool repeating_timer_callback_core_0(struct repeating_timer *t) {
         // SPI write (no spinlock b/c of SPI buffer)
         spi_write16_blocking(SPI_PORT, &DAC_data_0, 1) ;
 
+        // main signal out to monitor
+        DAC_data_1 = (DAC_config_chan_A | (DAC_output_0 & 0xffff))  ;
+
+        // SPI write (no spinlock b/c of SPI buffer)
+        spi_write16_blocking(SPI_PORT, &DAC_data_1, 1);
+
         // Increment the counter
         count_0 += 1 ;
     }
@@ -342,6 +348,14 @@ bool repeating_timer_callback_core_0(struct repeating_timer *t) {
         // SPI write (no spinlock b/c of SPI buffer)
         spi_write16_blocking(SPI_PORT, &DAC_data_0, 1) ;
 
+
+        // write out decay to monitor
+        // Mask with DAC control bits
+        DAC_data_1 = (DAC_config_chan_A | (DAC_output_0 & 0xffff))  ;
+
+        // SPI write (no spinlock b/c of SPI buffer)
+        spi_write16_blocking(SPI_PORT, &DAC_data_1, 1);
+
         // Increment the counter
         count_0 += 1 ;
         
@@ -369,7 +383,8 @@ bool repeating_timer_callback_core_0(struct repeating_timer *t) {
         // DAC_output_0 = fix2int15(multfix15(0, main_wave)) + 2048 ; // limit to amp
 
         // DAC_data_0 = (DAC_config_chan_B | (DAC_output_0 & 0xffff))  ;
-    //MONITOR
+
+        //MONITOR
         //moved this check is okay
         DAC_output_1 = fix2int15(multfix15(max_amplitude, 
             sine_table[monitor_accum>>24])) + 2048 ; // limit to amp
@@ -510,7 +525,7 @@ int main() {
 
     // Negative delay so means we will call repeating_timer_callback, and call it
     // again 25us (40kHz) later regardless of how long the callback took to execute
-    add_repeating_timer_us(-25, 
+    add_repeating_timer_us(-32, 
         repeating_timer_callback_core_0, NULL, &timer_core_0);
 
     // Add core 0 threads
